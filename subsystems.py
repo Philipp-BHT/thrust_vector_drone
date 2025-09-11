@@ -57,8 +57,8 @@ class Motor:
 
 class Deflector:
     def __init__(self):
-        self.max_deflection = math.radians(25)       # [rad]
-        self.max_rate       = math.radians(15)       # [rad/s]
+        self.max_deflection = math.radians(20)       # [rad]
+        self.max_rate       = math.radians(80)       # [rad/s]
         self.x = 0.0  # achieved deflection (pitch axis), rad
         self.y = 0.0  # achieved deflection (yaw axis),   rad
 
@@ -109,63 +109,70 @@ class FlightLog:
         })
 
 
-
 class ControlSystem:
-    def __init__(self, Kp=3.0, Ki=0.6, Kd=0.0, Kv=1.2, dt=0.01,
-                 max_deflect=math.radians(15), i_clamp=None):
-        self.Kp, self.Ki, self.Kd, self.Kv = Kp, Ki, Kd, Kv
+    def __init__(self,
+                 Kp=3.0, Ki=0.4, Kv=1.6,          # PI + rate damping (Kd=0)
+                 dt=0.01,
+                 max_deflect=math.radians(20),    # match Deflector
+                 i_clamp=None,
+                 max_tilt_deg=10.0,               # HARD cap (deg)
+                 soft_tilt_deg=7.0,               # start pushback (deg)
+                 Kguard=8.0):                     # guard strength
+        self.Kp, self.Ki, self.Kv = Kp, Ki, Kv
         self.dt = dt
         self.max_deflect = max_deflect
-        self.i_clamp = i_clamp if i_clamp is not None else 0.5 * max_deflect
+        self.i_clamp = 0.5*max_deflect if i_clamp is None else i_clamp
 
-        self.prev_error_pitch = 0.0
-        self.prev_error_yaw   = 0.0
-        self.integral_pitch   = 0.0
-        self.integral_yaw     = 0.0
+        self.max_tilt  = math.radians(max_tilt_deg)
+        self.soft_tilt = math.radians(soft_tilt_deg)
+        self.Kguard    = Kguard
+
+        self.i_pitch = 0.0
+        self.i_yaw   = 0.0
 
     @staticmethod
-    def _sat(x, lim):
-        return max(-lim, min(lim, x))
+    def _sat(x, lim): return max(-lim, min(lim, x))
 
-    def compute_target_deflection(self, drone, target_pitch, target_yaw):
-        # assume radians
-        pitch = drone.drone_state.orientation[0]
-        yaw   = drone.drone_state.orientation[1]
-        p_dot = drone.drone_state.angular_velocity[0]
-        y_dot = drone.drone_state.angular_velocity[1]
+    def _guard_term(self, angle):
+        """Zero inside soft_tilt; grows smoothly beyond to push back toward zero."""
+        a = abs(angle)
+        if a <= self.soft_tilt:
+            return 0.0
+        denom = max(self.max_tilt - self.soft_tilt, 1e-6)
+        r = (a - self.soft_tilt) / denom            # 0 at soft, 1 at hard
+        g = self.Kguard * math.tanh(2.0 * r)        # smooth, bounded
+        return -g * math.copysign(1.0, angle)
 
-        # --- pitch loop
-        e_p = target_pitch - pitch
-        self.integral_pitch += e_p * self.dt
-        self.integral_pitch = self._sat(self.integral_pitch, self.i_clamp)
-        d_p = (e_p - self.prev_error_pitch) / self.dt
-        self.prev_error_pitch = e_p
+    def compute_target_deflection(self, drone):
+        pitch, yaw = drone.drone_state.orientation[0], drone.drone_state.orientation[1]
+        p_dot, y_dot = drone.drone_state.angular_velocity[0], drone.drone_state.angular_velocity[1]
 
-        raw_pitch = (self.Kp * e_p +
-                     self.Ki * self.integral_pitch +
-                     self.Kd * d_p -        # set Kd=0 if Kv>0
-                     self.Kv * p_dot)
+        # errors to level (0 target)
+        e_p, e_y = -pitch, -yaw
 
-        # --- yaw loop
-        e_y = target_yaw - yaw
-        self.integral_yaw += e_y * self.dt
-        self.integral_yaw = self._sat(self.integral_yaw, self.i_clamp)
-        d_y = (e_y - self.prev_error_yaw) / self.dt
-        self.prev_error_yaw = e_y
+        # PI with clamp
+        self.i_pitch = self._sat(self.i_pitch + e_p * self.dt, self.i_clamp)
+        self.i_yaw   = self._sat(self.i_yaw   + e_y * self.dt, self.i_clamp)
 
-        raw_yaw = (self.Kp * e_y +
-                   self.Ki * self.integral_yaw +
-                   self.Kd * d_y -
-                   self.Kv * y_dot)
+        u_p = self.Kp*e_p + self.Ki*self.i_pitch - self.Kv*p_dot
+        u_y = self.Kp*e_y + self.Ki*self.i_yaw   - self.Kv*y_dot
 
-        # saturate outputs to physical limits
-        cmd_pitch = self._sat(raw_pitch, self.max_deflect)
-        cmd_yaw   = self._sat(raw_yaw,   self.max_deflect)
+        # soft tilt guard
+        u_p += self._guard_term(pitch)
+        u_y += self._guard_term(yaw)
 
-        return cmd_pitch, cmd_yaw
+        # hard guard
+        if abs(pitch) >= self.max_tilt:
+            u_p = -math.copysign(self.max_deflect, pitch)
+            self.i_pitch *= 0.9   # bleed integrator a bit
+        if abs(yaw)   >= self.max_tilt:
+            u_y = -math.copysign(self.max_deflect, yaw)
+            self.i_yaw   *= 0.9
 
-    def update(self, drone, target_pitch, target_yaw):
-        cmd_pitch, cmd_yaw = self.compute_target_deflection(drone, target_pitch, target_yaw)
+        return self._sat(u_p, self.max_deflect), self._sat(u_y, self.max_deflect)
+
+    def update(self, drone):
+        cmd_pitch, cmd_yaw = self.compute_target_deflection(drone)
         drone.deflector.set_deflection(cmd_pitch, cmd_yaw, self.dt)
 
 

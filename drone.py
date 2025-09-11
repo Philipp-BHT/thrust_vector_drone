@@ -22,13 +22,23 @@ class DroneSim:
         self.mass = self.weight / self.g
         self.thrust_N = self.weight
 
+        self.lever = 0.04  # [m] nozzle offset below CoM (tune 0.04–0.12)
+        self.J = np.diag([0.02, 0.02, 0.04])  # [kg m^2] inertia about body X,Y,Z (tune)
+        self.c_omega = 0.2  # [N m s/rad] rot. damping (tune)
+
+        # attitude state helper (quaternion)
+        self._q = np.array([1.0, 0.0, 0.0, 0.0])  # w,x,y,z
+
+        self.last_T = 0
+        self.last_tW = 0
+
     @staticmethod
     def _thrust_direction_body(x_defl, y_defl):
         """
         Map small deflections (pitch=x, yaw=y) to a unit thrust vector in body frame.
         Convention: nominal thrust along -Z_B; small-angle approx.
         """
-        t = np.array([ y_defl, -x_defl, -1.0 ])
+        t = np.array([ y_defl, -x_defl, 1.0 ])
         return t / np.linalg.norm(t)
 
     @staticmethod
@@ -42,10 +52,46 @@ class DroneSim:
         R_W_to_B = Rz @ Ry @ Rx
         return R_W_to_B
 
-    def update(self, dt, throttle, target_pitch, target_yaw, t_now=0.0):
+    def _omega_quat(self, w):  # w = [p,q,r]
+        return np.array([0.0, w[0], w[1], w[2]])
 
-        cmd_x, cmd_y = self.control_system.compute_target_deflection(self, target_pitch, target_yaw)
-        self.deflector.set_deflection(cmd_x, cmd_y, dt)
+    def _q_mul(self, q1, q2):
+        w1, x1, y1, z1 = q1
+        w2, x2, y2, z2 = q2
+        return np.array([
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+        ])
+
+    def _q_to_R_WB(self, q):
+        # world->body from quaternion (right-handed, unit q)
+        w, x, y, z = q
+        R = np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]
+        ])
+        return R
+
+    def _q_to_euler_zyx(self, q):
+        # returns pitch (Y), yaw (Z), roll (X) in radians to match your state ordering
+        w, x, y, z = q
+        # ZYX
+        yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        sp = -2 * (x * z - w * y)
+        sp = +1.0 if sp > +1.0 else (-1.0 if sp < -1.0 else sp)
+        pitch = math.asin(sp)
+        roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+        return np.array([pitch, yaw, roll])
+
+    def update(self, dt, throttle, target_pitch=None, target_yaw=None, t_now=0.0):
+
+        if target_pitch is not None and target_yaw is not None:
+            cmd_x, cmd_y = self.control_system.compute_target_deflection(self, target_pitch, target_yaw)
+            self.deflector.set_deflection(cmd_x, cmd_y, dt)
+
 
         self.motor.set_throttle(throttle)  # throttle in [0..1]
         self.motor.update(dt)
@@ -55,22 +101,53 @@ class DroneSim:
         t_hat_B = self._thrust_direction_body(x_defl, y_defl)
         f_B = T * t_hat_B
 
-        pitch, yaw, roll = self.drone_state.orientation
-        R_WB = self.euler_to_R_world_from_body(pitch, yaw, roll)
+        # --- Forces (world) as you already have ---
+        R_WB = self._q_to_R_WB(self._q)  # world->body from current q
+        R_BW = R_WB.T  # body->world
+        f_thrust_W = R_BW @ f_B
+        f_W = f_thrust_W + np.array([0, 0, -self.mass * self.g])  # gravity DOWN
+        # (optional) linear drag:
+        # f_W += -c_v * self.drone_state.velocity
 
-        f_W = R_WB.T @ f_B  # body->world
-        f_W += np.array([0.0, 0.0, self.mass * self.g])
-
-        c_v = 0.0
-        f_W += -c_v * self.drone_state.velocity
-
+        # --- Translational integration (same as you have) ---
         a_W = f_W / self.mass
         self.drone_state.acceleration = a_W
+        # ground contact (simple clamp)
+        if self.drone_state.position[2] <= 0 and a_W[2] < 0:
+            a_W[2] = 0.0
+            self.drone_state.velocity[2] = 0.0
         self.drone_state.velocity += a_W * dt
         self.drone_state.position += self.drone_state.velocity * dt
+        if self.drone_state.position[2] < 0:
+            self.drone_state.position[2] = 0.0
+            self.drone_state.velocity[2] = max(0.0, self.drone_state.velocity[2])
 
+        # --- ROTATIONAL DYNAMICS ---
+        # Lever arm: nozzle below CoM along -Z_B
+        r_T = np.array([0.0, 0.0, -self.lever])  # [m] in body frame
+        tau_B = np.cross(r_T, f_B)  # [Nm] pitch/yaw from lateral thrust
+        # simple rot. damping
+        tau_B += -self.c_omega * self.drone_state.angular_velocity
 
-        # 6) Log
+        # Euler's equation (diagonal J)
+        J = self.J
+        w = self.drone_state.angular_velocity
+        w_dot = np.linalg.inv(J) @ (tau_B - np.cross(w, J @ w))
+        self.drone_state.angular_velocity = w + w_dot * dt
+
+        # Quaternion integration: q_dot = 0.5 * q ⊗ [0, w]
+        q_dot = 0.5 * self._q_mul(self._q, self._omega_quat(self.drone_state.angular_velocity))
+        self._q = self._q + q_dot * dt
+        self._q /= np.linalg.norm(self._q)  # normalize
+
+        # Update Euler angles for your renderer/state (ZYX)
+        self.drone_state.orientation = self._q_to_euler_zyx(self._q)
+
+        # --- cache for renderer (world thrust vector) ---
+        self.last_T = T
+        self.last_tW = f_thrust_W / max(T, 1e-9)
+
+        # log (ideally log a copy)
         self.flight_records.add_state(self.drone_state, t_now)
 
 
