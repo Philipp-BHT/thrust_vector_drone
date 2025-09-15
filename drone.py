@@ -15,7 +15,9 @@ class DroneSim:
         self.deflector = Deflector()
         self.drone_state = DroneState()
         self.flight_records = FlightLog()
-        self.control_system = ControlSystem()
+        self.orientation_control = OrientationController()
+        self.altitude_control = AltitudeController()
+        self.position_control = PositionController()
         self.battery = Battery()
 
         self.g = 9.81
@@ -23,7 +25,7 @@ class DroneSim:
         self.thrust_N = self.weight
 
         self.lever = 0.04  # [m] nozzle offset below CoM (tune 0.04–0.12)
-        self.J = np.diag([0.02, 0.02, 0.04])  # [kg m^2] inertia about body X,Y,Z (tune)
+        self.J = np.diag([0.2, 0.2, 0.4])  # [kg m^2] inertia about body X,Y,Z (tune)
         self.c_omega = 0.2  # [N m s/rad] rot. damping (tune)
 
         # attitude state helper (quaternion)
@@ -41,17 +43,6 @@ class DroneSim:
         t = np.array([ y_defl, -x_defl, 1.0 ])
         return t / np.linalg.norm(t)
 
-    @staticmethod
-    def euler_to_R_world_from_body(pitch, yaw, roll):
-        cp, sp = math.cos(pitch), math.sin(pitch)
-        cy, sy = math.cos(yaw), math.sin(yaw)
-        cr, sr = math.cos(roll), math.sin(roll)
-        Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
-        Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
-        Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
-        R_W_to_B = Rz @ Ry @ Rx
-        return R_W_to_B
-
     def _omega_quat(self, w):  # w = [p,q,r]
         return np.array([0.0, w[0], w[1], w[2]])
 
@@ -65,15 +56,14 @@ class DroneSim:
             w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
         ])
 
-    def _q_to_R_WB(self, q):
-        # world->body from quaternion (right-handed, unit q)
+    def _q_to_R_BW(self, q):
+        # body -> world
         w, x, y, z = q
-        R = np.array([
+        return np.array([
             [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
             [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
         ])
-        return R
 
     def _q_to_euler_zyx(self, q):
         # returns pitch (Y), yaw (Z), roll (X) in radians to match your state ordering
@@ -84,16 +74,26 @@ class DroneSim:
         sp = +1.0 if sp > +1.0 else (-1.0 if sp < -1.0 else sp)
         pitch = math.asin(sp)
         roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
-        return np.array([pitch, yaw, roll])
+        return np.array([roll, pitch, yaw])
 
-    def update(self, dt, throttle, target_pitch=None, target_yaw=None, t_now=0.0):
+    def update(self, dt, throttle,
+               manual_deflection=None,  # (alpha, beta) in radians if mode="manual"
+               ref_pitch=0.0, ref_yaw=0.0,  # desired attitude if closed-loop
+               t_now=0.0):
 
-        if target_pitch is not None and target_yaw is not None:
-            cmd_x, cmd_y = self.control_system.compute_target_deflection(self, target_pitch, target_yaw)
-            self.deflector.set_deflection(cmd_x, cmd_y, dt)
+        # choose ONE deflection source
+        if manual_deflection:
+            alpha = manual_deflection[0]
+            beta = manual_deflection[1]
+        else:
+            alpha, beta = self.orientation_control.compute_target_deflection(self, ref_pitch, ref_yaw)
+        # alpha, beta = manual_deflection
+        # print(alpha, beta)
 
+        self.deflector.set_deflection(alpha, beta, dt)
 
-        self.motor.set_throttle(throttle)  # throttle in [0..1]
+        # motor & dynamics
+        self.motor.set_throttle(throttle)
         self.motor.update(dt)
         T = self.motor.get_thrust()
 
@@ -102,15 +102,14 @@ class DroneSim:
         f_B = T * t_hat_B
 
         # --- Forces (world) as you already have ---
-        R_WB = self._q_to_R_WB(self._q)  # world->body from current q
-        R_BW = R_WB.T  # body->world
-        f_thrust_W = R_BW @ f_B
-        f_W = f_thrust_W + np.array([0, 0, -self.mass * self.g])  # gravity DOWN
-        # (optional) linear drag:
-        # f_W += -c_v * self.drone_state.velocity
-
-        # --- Translational integration (same as you have) ---
+        R_WB = self._q_to_R_BW(self._q)  # world->body from current q
+        # R_BW = R_WB.T  # body->world
+        f_thrust_W = R_WB @ f_B
+        # before computing a_W:
+        c_lin = 2 * self.mass  # N per (m/s) – tune 0.3..1.0 * mass
+        f_W = f_thrust_W + np.array([0, 0, -self.mass * self.g]) - c_lin * self.drone_state.velocity
         a_W = f_W / self.mass
+
         self.drone_state.acceleration = a_W
         # ground contact (simple clamp)
         if self.drone_state.position[2] <= 0 and a_W[2] < 0:
@@ -129,25 +128,20 @@ class DroneSim:
         # simple rot. damping
         tau_B += -self.c_omega * self.drone_state.angular_velocity
 
-        # Euler's equation (diagonal J)
         J = self.J
         w = self.drone_state.angular_velocity
         w_dot = np.linalg.inv(J) @ (tau_B - np.cross(w, J @ w))
         self.drone_state.angular_velocity = w + w_dot * dt
 
-        # Quaternion integration: q_dot = 0.5 * q ⊗ [0, w]
         q_dot = 0.5 * self._q_mul(self._q, self._omega_quat(self.drone_state.angular_velocity))
         self._q = self._q + q_dot * dt
         self._q /= np.linalg.norm(self._q)  # normalize
 
-        # Update Euler angles for your renderer/state (ZYX)
         self.drone_state.orientation = self._q_to_euler_zyx(self._q)
 
-        # --- cache for renderer (world thrust vector) ---
         self.last_T = T
         self.last_tW = f_thrust_W / max(T, 1e-9)
 
-        # log (ideally log a copy)
         self.flight_records.add_state(self.drone_state, t_now)
 
 
@@ -236,23 +230,3 @@ def animate_trajectory_3d(flight_log):
                         init_func=init, interval=30, blit=False, repeat=False)
     plt.show()
 
-
-
-if __name__ == "__main__":
-    dt = 0.01
-    t_end = 5.0
-    n = int(t_end / dt)
-
-    drone = DroneSim(weight=2.0 * 9.81,
-                     diameter=0.2,
-                     height=0.4,
-                     motor_model="T-Motor F80 PRO 2408 Brushless Motor")
-
-    for i in range(n):
-        t = i * dt
-        throttle = 0.9
-        target_pitch = 0.10  # rad
-        target_yaw = 0.15  # rad
-        drone.update(dt=dt, throttle=throttle, target_pitch=target_pitch, target_yaw=target_yaw, t_now=t)
-
-    animate_trajectory_3d(drone.flight_records)

@@ -56,30 +56,29 @@ class Motor:
 
 
 class Deflector:
-    def __init__(self):
-        self.max_deflection = math.radians(20)       # [rad]
-        self.max_rate       = math.radians(80)       # [rad/s]
-        self.x = 0.0  # achieved deflection (pitch axis), rad
-        self.y = 0.0  # achieved deflection (yaw axis),   rad
-
-    def set_deflection(self, target_x, target_y, dt):
-        """Track target angles with rate and magnitude limits; store achieved."""
-        max_step = self.max_rate * dt
-
-        # X axis
-        dx = target_x - self.x
-        dx = max(-max_step, min(max_step, dx))
-        self.x += dx
-        self.x = max(-self.max_deflection, min(self.max_deflection, self.x))
-
-        # Y axis
-        dy = target_y - self.y
-        dy = max(-max_step, min(max_step, dy))
-        self.y += dy
-        self.y = max(-self.max_deflection, min(self.max_deflection, self.y))
+    def __init__(self, max_deflection=math.radians(20), max_rate=math.radians(60)):
+        self.max_deflection = max_deflection
+        self.max_rate = max_rate
+        self._alpha = 0.0
+        self._beta  = 0.0
 
     def get_deflection(self):
-        return self.x, self.y  # radians
+        return self._alpha, self._beta
+
+    def set_deflection(self, alpha_target, beta_target, dt):
+        # slew _alpha toward alpha_target by max_rate*dt
+        step = self.max_rate * dt
+        def slew(curr, target):
+            delta = target - curr
+            if abs(delta) <= step: return target
+            return curr + math.copysign(step, delta)
+        # clamp targets (safety)
+        alpha_target = max(-self.max_deflection, min(self.max_deflection, alpha_target))
+        beta_target  = max(-self.max_deflection, min(self.max_deflection,  beta_target))
+        # integrate
+        self._alpha = slew(self._alpha, alpha_target)
+        self._beta  = slew(self._beta,  beta_target)
+
 
 
 class DroneState:
@@ -109,71 +108,144 @@ class FlightLog:
         })
 
 
-class ControlSystem:
+class AltitudeController:
+    def __init__(self, Kp=1.2, Ki=0.4, Kv=0.8, dt=0.01,
+                 i_clamp=3.0,  # clamp on the integral term (m/s)
+                 min_cos=0.2,  # avoid divide-by-near-zero when tilted hard
+                 a_cmd_limit=5.0):  # vertical accel command limit (m/s^2)
+        self.Kp, self.Ki, self.Kv = Kp, Ki, Kv
+        self.dt = dt
+        self.i = 0.0
+        self.i_clamp = i_clamp
+        self.min_cos = min_cos
+        self.a_cmd_limit = a_cmd_limit
+
+    @staticmethod
+    def _sat(x, lim): return max(-lim, min(lim, x))
+
+    def step(self, drone, z_ref):
+        """Return throttle u in [0..1] to hold altitude z_ref (meters)."""
+        # --- measurements ---
+        z = drone.drone_state.position[2]  # world Z up
+        vz = drone.drone_state.velocity[2]  # world vertical speed
+
+        # --- error ---
+        e_z = z_ref - z
+
+        # --- PI + rate damping on vertical speed (vz_ref = 0) ---
+        self.i = self._sat(self.i + e_z * self.dt, self.i_clamp)
+        a_cmd = self.Kp * e_z + self.Ki * self.i - self.Kv * vz  # desired vertical accel (m/s^2)
+        a_cmd = self._sat(a_cmd, self.a_cmd_limit)
+
+        # --- thrust direction & tilt compensation ---
+        # use the CURRENT deflector to know where thrust points
+        alpha, beta = drone.deflector.get_deflection()
+        t_hat_B = drone._thrust_direction_body(alpha, beta)
+        R_BW = drone._q_to_R_BW(drone._q)
+        dir_W = R_BW @ t_hat_B
+        dir_W_z = max(dir_W[2], self.min_cos)  # tilt compensation
+
+        # --- required thrust magnitude ---
+        m, g = drone.mass, drone.g
+        # Want: (T*dir_W_z - m*g)/m  ≈  a_cmd   ->   T = m*(g + a_cmd)/dir_W_z
+        T_req = m * (g + a_cmd) / dir_W_z
+
+        # --- convert to throttle u (T ≈ T_max * u^2) ---
+        T_max = drone.motor.T_max_N
+        T_req = max(0.0, min(T_req, T_max))  # saturate to physical limit
+        u = (T_req / T_max) ** 0.5
+
+        # --- simple anti-windup: only integrate when not hard-saturated outward ---
+        saturated = (T_req <= 1e-6) or (T_req >= T_max - 1e-6)
+        if saturated:
+            # If pushing further in the same direction, pause integral growth
+            pass  # (already handled by clamping; keep it simple for now)
+
+        return u
+
+
+class OrientationController:
     def __init__(self,
-                 Kp=3.0, Ki=0.4, Kv=1.6,          # PI + rate damping (Kd=0)
+                 Kp=2.5, Ki=0, Kv=6,          # PI + rate damping (Kd=0)
                  dt=0.01,
-                 max_deflect=math.radians(20),    # match Deflector
-                 i_clamp=None,
-                 max_tilt_deg=10.0,               # HARD cap (deg)
-                 soft_tilt_deg=7.0,               # start pushback (deg)
-                 Kguard=8.0):                     # guard strength
+                 max_deflect=math.radians(15),
+                 i_clamp=None):
         self.Kp, self.Ki, self.Kv = Kp, Ki, Kv
         self.dt = dt
         self.max_deflect = max_deflect
         self.i_clamp = 0.5*max_deflect if i_clamp is None else i_clamp
 
-        self.max_tilt  = math.radians(max_tilt_deg)
-        self.soft_tilt = math.radians(soft_tilt_deg)
-        self.Kguard    = Kguard
-
-        self.i_pitch = 0.0
-        self.i_yaw   = 0.0
+        self.i_pitch = 0
+        self.i_yaw   = 0
 
     @staticmethod
     def _sat(x, lim): return max(-lim, min(lim, x))
 
-    def _guard_term(self, angle):
-        """Zero inside soft_tilt; grows smoothly beyond to push back toward zero."""
-        a = abs(angle)
-        if a <= self.soft_tilt:
-            return 0.0
-        denom = max(self.max_tilt - self.soft_tilt, 1e-6)
-        r = (a - self.soft_tilt) / denom            # 0 at soft, 1 at hard
-        g = self.Kguard * math.tanh(2.0 * r)        # smooth, bounded
-        return -g * math.copysign(1.0, angle)
-
-    def compute_target_deflection(self, drone):
+    def compute_target_deflection(self, drone, ref_pitch=0.0, ref_yaw=0.0):
         pitch, yaw = drone.drone_state.orientation[0], drone.drone_state.orientation[1]
         p_dot, y_dot = drone.drone_state.angular_velocity[0], drone.drone_state.angular_velocity[1]
+        e_p, e_y = (ref_pitch - pitch), (ref_yaw - yaw)
 
-        # errors to level (0 target)
-        e_p, e_y = -pitch, -yaw
+        # self.i_pitch = self._sat(self.i_pitch + e_p * self.dt, self.i_clamp)
+        # self.i_yaw = self._sat(self.i_yaw + e_y * self.dt, self.i_clamp)
 
-        # PI with clamp
-        self.i_pitch = self._sat(self.i_pitch + e_p * self.dt, self.i_clamp)
-        self.i_yaw   = self._sat(self.i_yaw   + e_y * self.dt, self.i_clamp)
+        u_p = self.Kp * e_p + self.Ki * self.i_pitch - self.Kv * p_dot
+        u_y = self.Kp * e_y + self.Ki * self.i_yaw - self.Kv * y_dot
+        return -u_p, -u_y
 
-        u_p = self.Kp*e_p + self.Ki*self.i_pitch - self.Kv*p_dot
-        u_y = self.Kp*e_y + self.Ki*self.i_yaw   - self.Kv*y_dot
+class PositionController:
+    def __init__(self,
+                 Kp=0.1, Ki=0, Kv=1, dt=0.01,
+                 i_clamp=2.0,                # meters*s anti-windup
+                 max_tilt_deg=8.0,          # attitude reference limit
+                 sign_pitch=-1.0,            # θ_ref ≈ sign_pitch * a_x/g
+                 sign_roll =+1.0):           # φ_ref ≈ sign_roll  * a_y/g
+        self.Kp, self.Ki, self.Kv = Kp, Ki, Kv
+        self.dt = dt
+        self.ix = 0.0
+        self.iy = 0.0
+        self.i_clamp = i_clamp
+        self.max_tilt = math.radians(max_tilt_deg)
+        self.sign_pitch = sign_pitch
+        self.sign_roll  = sign_roll
+        self.x_ref = None  # will be captured on first hold
+        self.y_ref = None
 
-        # soft tilt guard
-        u_p += self._guard_term(pitch)
-        u_y += self._guard_term(yaw)
+    @staticmethod
+    def _sat(x, lim): return max(-lim, min(lim, x))
 
-        # hard guard
-        if abs(pitch) >= self.max_tilt:
-            u_p = -math.copysign(self.max_deflect, pitch)
-            self.i_pitch *= 0.9   # bleed integrator a bit
-        if abs(yaw)   >= self.max_tilt:
-            u_y = -math.copysign(self.max_deflect, yaw)
-            self.i_yaw   *= 0.9
+    def capture_here(self, drone):
+        x, y, _ = drone.drone_state.position
+        self.x_ref, self.y_ref = float(x), float(y)
+        # optional: zero integrators on capture to avoid bumps
+        self.ix = 0.0
+        self.iy = 0.0
+        print("Capture at ", self.x_ref, self.y_ref)
 
-        return self._sat(u_p, self.max_deflect), self._sat(u_y, self.max_deflect)
+    def step(self, drone):
+        """Return (pitch_ref, roll_ref) in radians to hold XY."""
+        assert self.x_ref is not None and self.y_ref is not None, "Call capture_here() first."
+        x, y, _  = drone.drone_state.position
 
-    def update(self, drone):
-        cmd_pitch, cmd_yaw = self.compute_target_deflection(drone)
-        drone.deflector.set_deflection(cmd_pitch, cmd_yaw, self.dt)
+        # print("Desired Position: ", round(self.x_ref, 2), " ", round(self.y_ref, 2), ", Actual position: ", round(drone.drone_state.position[0], 2), " ", round(drone.drone_state.position[1], 2))
+        vx, vy, _ = drone.drone_state.velocity
+        ex = self.x_ref - y
+        ey = self.y_ref - x
+        # print(f"Error: {ex}, {ey}")
+
+        # PI on position + damping on velocity -> desired horizontal acceleration (m/s^2)
+        self.ix = self._sat(self.ix + ex * self.dt, self.i_clamp)
+        self.iy = self._sat(self.iy + ey * self.dt, self.i_clamp)
+        ax_cmd = self.Kp*ex + self.Ki*self.ix - self.Kv*vx
+        ay_cmd = self.Kp*ey + self.Ki*self.iy - self.Kv*vy
+
+        # small-angle map: a_x ≈ g * θ, a_y ≈ g * φ (signs depend on axes)
+        g = drone.g
+        pitch_ref = self.sign_pitch * self._sat(ax_cmd / g, self.max_tilt)  # θ (about body-Y)
+        roll_ref  = self.sign_roll  * self._sat(ay_cmd / g, self.max_tilt)  # φ (about body-X)
+
+        return pitch_ref, roll_ref
+
 
 
 class Battery:

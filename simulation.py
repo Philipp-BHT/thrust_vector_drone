@@ -7,7 +7,7 @@ import math
 from drone import DroneSim
 
 
-def draw_reference_rings(center, radius=15, segments=100):
+def draw_reference_rings(center, radius=0.2, segments=100):
     """ Draws 3 axis-aligned rings (X, Y, Z) centered at the given position. """
     x, y, z = center
     glLineWidth(1)
@@ -67,25 +67,26 @@ def draw_drone(drone: DroneSim):
 
     pitch, yaw, roll = drone.drone_state.orientation  # RAD
     # Apply Rz(-yaw) → Ry(-pitch) → Rx(-roll); degrees for GL
-    glRotatef(-math.degrees(yaw),   0, 0, 1)  # yaw about Z
+    glRotatef(-math.degrees(yaw),   1, 0, 0)  # yaw about Z
     glRotatef(-math.degrees(pitch), 0, 1, 0)  # pitch about Y
-    glRotatef(-math.degrees(roll),  1, 0, 0)  # roll about X
+    glRotatef(-math.degrees(roll),  0, 0, 1)  # roll about X
 
     # --- Body geometry (cylinder) ---
     quadric = gluNewQuadric()
-    glColor3f(0, 0, 0)
-    gluCylinder(quadric, drone.diameter*40, drone.diameter*40, drone.height*40, 20, 20)
+    glColor3f(0.3, 0.3, 0.5)
+    radius = drone.diameter * 0.5
+    gluCylinder(quadric, radius, radius, drone.height, 20, 20)
 
-    # --- Nozzle/deflector (in body frame) ---
+    # Nozzle (local to body). alpha = about Y, beta = about X:
     glPushMatrix()
-    alpha_rad, beta_rad = drone.deflector.get_deflection()  # RAD
-    glRotatef(math.degrees(beta_rad),  1, 0, 0)  # yaw β about Z
-    glRotatef(math.degrees(alpha_rad), 0, 1, 0)  # pitch α about Y
-    glTranslatef(0, 0, -5)                        # put it under the body
-    glColor3f(0.5, 0.7, 1)
-    gluCylinder(quadric, 4, 2, 10, 10, 10)
-    glPopMatrix()
+    alpha_rad, beta_rad = drone.deflector.get_deflection()
+    glRotatef(math.degrees(beta_rad), 1, 0, 0)  # roll axis (X)
+    glRotatef(math.degrees(alpha_rad), 0, 1, 0)  # pitch axis (Y)
 
+    glTranslatef(0, 0, -0.15)
+    glColor3f(0.8, 0.3, 0.5)
+    gluCylinder(quadric, radius*0.75, radius, drone.height * 0.5, 10, 10)
+    glPopMatrix()
     glPopMatrix()
 
     # --- Trajectory points (read positions from your log) ---
@@ -110,7 +111,7 @@ def draw_grid():
 
     # Grid size and spacing
     grid_size = 10000  # Increase to make it visible
-    spacing = 5  # Distance between grid lines
+    spacing = 1  # Distance between grid lines
 
     # Draw vertical and horizontal lines
     for i in range(-grid_size, grid_size + 1, spacing):
@@ -122,16 +123,6 @@ def draw_grid():
 
     glEnd()
     glPopMatrix()
-
-
-def draw_stars(stars):
-    """ Draws stars in the background for reference. """
-    glPointSize(2)
-    glBegin(GL_POINTS)
-    glColor3f(1, 1, 1)
-    for x, y, z in stars:
-        glVertex3f(x, y, z)
-    glEnd()
 
 
 def draw_background():
@@ -196,23 +187,20 @@ def draw_stats(font, screen_width, screen_height, drone):
 
 
 def display(font, screen_width, screen_height, drone, camera_angle_yaw, camera_angle_pitch, stars):
-    """ Updates the camera to follow the rocket. """
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     draw_background()
 
-    glPushMatrix()
+    # ---- Camera for this frame ----
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()
 
-    center_of_mass = 0
+    center_of_mass = 0.0
     x_position, y_position, z_position = drone.drone_state.position
 
-    height_factor = min(250, abs(z_position) / 5)  # Increase distance at high altitude
+    camera_distance = 3.0   # meters; change freely now
+    camera_height   = 1.5   # meters
 
-    camera_distance = 5 # + height_factor
-    camera_height = 15 # + height_factor
-
-
-
-    yaw_camera_angle_rad = np.deg2rad(camera_angle_yaw)
+    yaw_camera_angle_rad   = np.deg2rad(camera_angle_yaw)
     pitch_camera_angle_rad = np.deg2rad(camera_angle_pitch)
 
     eye_x = x_position + camera_distance * math.cos(yaw_camera_angle_rad)
@@ -223,14 +211,15 @@ def display(font, screen_width, screen_height, drone, camera_angle_yaw, camera_a
               x_position, y_position, z_position + center_of_mass,
               0, 0, 1)
 
-    draw_stars(stars)
+    glPushMatrix()
     draw_grid()
     draw_drone(drone)
     draw_controls(font, screen_height)
     draw_stats(font, screen_width, screen_height, drone)
-
     glPopMatrix()
+
     pygame.display.flip()
+
 
 def get_current_waypoint(t, waypoints):
     # Find the last keyframe ≤ current time
@@ -247,19 +236,27 @@ def run_pygame_simulation():
     pygame.display.set_caption("Real-Time 3D Drone Simulation")
     screen = pygame.display.set_mode((screen_width, screen_height), DOUBLEBUF | OPENGL)
 
-    glEnable(GL_DEPTH_TEST)
-    gluPerspective(60, screen_width / screen_height, 0.1, 1000.0)
-    glTranslatef(0, -5, -100)
+    # ---- One-time GL setup ----
+    glViewport(0, 0, screen_width, screen_height)
 
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    # Tighter FOV and meter-friendly near/far planes
+    gluPerspective(40.0, screen_width / screen_height, 0.01, 50.0)
+
+    glMatrixMode(GL_MODELVIEW)
+    glLoadIdentity()           # IMPORTANT: start modelview clean (no global translate!)
+
+    glEnable(GL_DEPTH_TEST)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    font = pygame.font.SysFont("Arial", 18)
 
+    font = pygame.font.SysFont("Arial", 18)
     clock = pygame.time.Clock()
 
     drone = DroneSim(weight=1.9*9.81,
                      diameter=0.2,
-                     height=0.4,
+                     height=0.3,
                      motor_model="T-Motor F80 PRO 2408 Brushless Motor")
 
     max_gimbal_rate = 20  # deg/s
@@ -267,6 +264,8 @@ def run_pygame_simulation():
     camera_angle_yaw = 0
     launched = False
     running = True
+    manual_prev = False
+    z_ref = 2.0
 
     t = 0.0
     stars = [(np.random.uniform(-500, 500), np.random.uniform(100, 500), np.random.uniform(-500, 500))
@@ -297,33 +296,40 @@ def run_pygame_simulation():
         if keys[K_SPACE]:
             launched = True
 
-        # ---------- Controls ----------
-        # Hover throttle (T ∝ u^2)
-        u_hover = math.sqrt((drone.mass * drone.g) / drone.motor.T_max_N)
-        throttle = 1 if launched else 0.0
-        throttle = max(0.0, min(1.0, throttle))
-
-        # Gimbal manual control in radians
-        alpha, beta = drone.deflector.get_deflection()  # rad
+        if launched:
+            throttle = drone.altitude_control.step(drone, z_ref)
+        else:
+            throttle = 0
+        alpha, beta = drone.deflector.get_deflection()
         step = drone.deflector.max_rate * dt
+
         if keys[K_a]: alpha -= step
         if keys[K_d]: alpha += step
-        if keys[K_s]: beta  -= step
-        if keys[K_w]: beta  += step
-        # spring-back when no key pressed
-        ret = step * 0.5
-        if not (keys[K_a] or keys[K_d]):
-            alpha = alpha - ret if alpha > 0 else alpha + ret if alpha < 0 else 0.0
-        if not (keys[K_w] or keys[K_s]):
-            beta  = beta  - ret if beta  > 0 else beta  + ret if beta  < 0 else 0.0
+        if keys[K_s]: beta -= step
+        if keys[K_w]: beta += step
 
-        drone.deflector.set_deflection(alpha, beta, dt)
+        alpha = max(-drone.deflector.max_deflection, min(drone.deflector.max_deflection, alpha))
+        beta = max(-drone.deflector.max_deflection, min(drone.deflector.max_deflection, beta))
 
-        # ---------- Physics step (always) ----------
-        # Pass throttle ∈ [0..1]; targets = 0 to keep attitude neutral if you’re not using the attitude loop
-        drone.update(dt=dt, throttle=throttle, target_pitch=None, target_yaw=None, t_now=t)
+        pressed = keys[K_a] or keys[K_d] or keys[K_s] or keys[K_w]
+        manual_deflection = (alpha, beta) if pressed else None
+
+        if manual_prev and not pressed:
+            drone.position_control.capture_here(drone)
+
+        if drone.position_control.x_ref is None:
+            drone.position_control.capture_here(drone)
+
+        if not pressed:
+            pitch_ref, roll_ref = drone.position_control.step(drone)
+        else:
+            pitch_ref, roll_ref = 0, 0
+
+        drone.update(dt, throttle, manual_deflection=manual_deflection, ref_pitch=pitch_ref, ref_yaw=roll_ref)
+
         drone.flight_records.add_state(drone.drone_state, t)
         t += dt
+        manual_prev = pressed
 
         display(font, screen_width, screen_height, drone, camera_angle_yaw, camera_angle_pitch, stars)
 
