@@ -221,6 +221,7 @@ class PositionController:
         self.ix = 0.0
         self.iy = 0.0
         print("Capture at ", self.x_ref, self.y_ref)
+        print(drone.drone_state.position)
 
     def step(self, drone):
         """Return (pitch_ref, roll_ref) in radians to hold XY."""

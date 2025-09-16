@@ -182,9 +182,16 @@ def draw_controls(font, screen_height):
 
 
 def draw_stats(font, screen_width, screen_height, drone):
-    draw_text(font, f"Speed: {int(sum(drone.drone_state.velocity))} m/s", screen_width - 10, screen_height - 20, align="right")
-    draw_text(font, f"Altitude {int(drone.drone_state.position[2])} m", screen_width - 10, screen_height - 40, align="right")
+    draw_text(font, f"Speed: {round(sum(drone.drone_state.velocity),2)} m/s", screen_width - 10, screen_height - 20, align="right")
+    draw_text(font, f"Altitude {round(drone.drone_state.position[2],2)} m", screen_width - 10, screen_height - 40, align="right")
 
+def draw_point_3d(drone, obj, color=(1.0, 0.2, 0.2, 1.0)):
+    if any([drone.position_control.x_ref, drone.position_control.y_ref]):
+        glPushMatrix()
+        glTranslatef(drone.position_control.x_ref, drone.position_control.y_ref, 2)
+        glColor4f(*color)  # with GL_COLOR_MATERIAL enabled in your setup
+        gluSphere(obj, 0.1, 16, 12)
+        glPopMatrix()
 
 def display(font, screen_width, screen_height, drone, camera_angle_yaw, camera_angle_pitch, stars):
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -193,6 +200,8 @@ def display(font, screen_width, screen_height, drone, camera_angle_yaw, camera_a
     # ---- Camera for this frame ----
     glMatrixMode(GL_MODELVIEW)
     glLoadIdentity()
+    SPHERE_QUAD = gluNewQuadric()
+    gluQuadricNormals(SPHERE_QUAD, GLU_SMOOTH)
 
     center_of_mass = 0.0
     x_position, y_position, z_position = drone.drone_state.position
@@ -214,12 +223,12 @@ def display(font, screen_width, screen_height, drone, camera_angle_yaw, camera_a
     glPushMatrix()
     draw_grid()
     draw_drone(drone)
+    draw_point_3d(drone, SPHERE_QUAD)
     draw_controls(font, screen_height)
     draw_stats(font, screen_width, screen_height, drone)
     glPopMatrix()
 
     pygame.display.flip()
-
 
 def get_current_waypoint(t, waypoints):
     # Find the last keyframe ≤ current time
