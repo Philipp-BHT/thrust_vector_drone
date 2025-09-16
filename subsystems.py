@@ -109,11 +109,12 @@ class FlightLog:
 
 
 class AltitudeController:
-    def __init__(self, Kp=1.2, Ki=0.4, Kv=0.8, dt=0.01,
+    def __init__(self, control_params = None, dt=0.01,
                  i_clamp=3.0,  # clamp on the integral term (m/s)
                  min_cos=0.2,  # avoid divide-by-near-zero when tilted hard
                  a_cmd_limit=5.0):  # vertical accel command limit (m/s^2)
-        self.Kp, self.Ki, self.Kv = Kp, Ki, Kv
+        self.Kp, self.Ki, self.Kv = [control_params.Kp, control_params.Ki, control_params.Kv] if (
+            control_params) else [1.2, 0.4, 0.8]
         self.dt = dt
         self.i = 0.0
         self.i_clamp = i_clamp
@@ -166,11 +167,13 @@ class AltitudeController:
 
 class OrientationController:
     def __init__(self,
-                 Kp=2.5, Ki=0, Kv=6,          # PI + rate damping (Kd=0)
+                 control_params=None,
                  dt=0.01,
                  max_deflect=math.radians(15),
                  i_clamp=None):
-        self.Kp, self.Ki, self.Kv = Kp, Ki, Kv
+        self.Kp, self.Ki, self.Kv = [control_params.Kp, control_params.Ki, control_params.Kv] if (
+            control_params) else [2.5, 0, 6]
+
         self.dt = dt
         self.max_deflect = max_deflect
         self.i_clamp = 0.5*max_deflect if i_clamp is None else i_clamp
@@ -192,12 +195,13 @@ class OrientationController:
 
 class PositionController:
     def __init__(self,
-                 Kp=0.1, Ki=0, Kv=1, dt=0.01,
+                 control_params=None, dt=0.01,
                  i_clamp=2.0,
                  max_tilt_deg=8.0,
-                 sign_pitch=-1.0,
-                 sign_roll =+1.0):
-        self.Kp, self.Ki, self.Kv = Kp, Ki, Kv
+                 sign_pitch=1.0,
+                 sign_roll =-1.0):
+        self.Kp, self.Ki, self.Kv = [control_params.Kp, control_params.Ki, control_params.Kv] if (
+            control_params) else [0.1, 0, 1]
         self.dt = dt
         self.ix = 0.0
         self.iy = 0.0
@@ -214,7 +218,6 @@ class PositionController:
     def capture_here(self, drone):
         x, y, _ = drone.drone_state.position
         self.x_ref, self.y_ref = float(x), float(y)
-        # optional: zero integrators on capture to avoid bumps
         self.ix = 0.0
         self.iy = 0.0
         print("Capture at ", self.x_ref, self.y_ref)
@@ -227,8 +230,8 @@ class PositionController:
 
         # print("Desired Position: ", round(self.x_ref, 2), " ", round(self.y_ref, 2), ", Actual position: ", round(drone.drone_state.position[0], 2), " ", round(drone.drone_state.position[1], 2))
         vx, vy, _ = drone.drone_state.velocity
-        ex = self.x_ref - y
-        ey = self.y_ref - x
+        ex = self.x_ref - x
+        ey = self.y_ref - y
 
         self.ix = self._sat(self.ix + ex * self.dt, self.i_clamp)
         self.iy = self._sat(self.iy + ey * self.dt, self.i_clamp)

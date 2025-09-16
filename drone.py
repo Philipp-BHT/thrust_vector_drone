@@ -1,12 +1,20 @@
 from subsystems import *
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
+from dataclasses import dataclass
+
+@dataclass
+class ControlParams:
+    Kp: float = 1.2
+    Ki: float = 0.4
+    Kv: float = 0.8
 
 
 class DroneSim:
-    def __init__(self, weight, diameter, height, motor_model: str = None):
+    def __init__(self, weight, diameter, height, motor_model: str = None,
+                 altitude_control=ControlParams(),
+                 orientation_control=ControlParams(),
+                 position_control=ControlParams()):
         self.weight = weight
         self.diameter = diameter
         self.height = height
@@ -15,9 +23,9 @@ class DroneSim:
         self.deflector = Deflector()
         self.drone_state = DroneState()
         self.flight_records = FlightLog()
-        self.orientation_control = OrientationController()
-        self.altitude_control = AltitudeController()
-        self.position_control = PositionController()
+        self.orientation_control = OrientationController(orientation_control)
+        self.altitude_control = AltitudeController(altitude_control)
+        self.position_control = PositionController(position_control)
         self.battery = Battery()
 
         self.g = 9.81
@@ -76,6 +84,30 @@ class DroneSim:
         roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
         return np.array([roll, pitch, yaw])
 
+    def euler_zyx_to_q(self, roll: float, pitch: float, yaw: float):
+        """
+        Convert Euler angles (ZYX convention) to quaternion.
+        Input: roll (X), pitch (Y), yaw (Z) in radians
+        Output: (w, x, y, z)
+        """
+        cy = math.cos(yaw * 0.5)
+        sy = math.sin(yaw * 0.5)
+        cp = math.cos(pitch * 0.5)
+        sp = math.sin(pitch * 0.5)
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
+
+        w = cr * cp * cy + sr * sp * sy
+        x = sr * cp * cy - cr * sp * sy
+        y = cr * sp * cy + sr * cp * sy
+        z = cr * cp * sy - sr * sp * cy
+
+        return (w, x, y, z)
+
+    def set_orientation_euler(self, roll=0.0, pitch=0.0, yaw=0.0):
+        self._q = self.euler_zyx_to_q(roll=roll, pitch=pitch, yaw=yaw)
+        self.drone_state.orientation = [roll, pitch, yaw]
+
     def update(self, dt, throttle,
                manual_deflection=None,  # (alpha, beta) in radians if mode="manual"
                ref_pitch=0.0, ref_yaw=0.0,  # desired attitude if closed-loop
@@ -124,8 +156,7 @@ class DroneSim:
         # --- ROTATIONAL DYNAMICS ---
         # Lever arm: nozzle below CoM along -Z_B
         r_T = np.array([0.0, 0.0, -self.lever])  # [m] in body frame
-        tau_B = np.cross(r_T, f_B)  # [Nm] pitch/yaw from lateral thrust
-        # simple rot. damping
+        tau_B = np.cross(r_T, f_B)
         tau_B += -self.c_omega * self.drone_state.angular_velocity
 
         J = self.J
@@ -135,7 +166,7 @@ class DroneSim:
 
         q_dot = 0.5 * self._q_mul(self._q, self._omega_quat(self.drone_state.angular_velocity))
         self._q = self._q + q_dot * dt
-        self._q /= np.linalg.norm(self._q)  # normalize
+        self._q /= np.linalg.norm(self._q)
 
         self.drone_state.orientation = self._q_to_euler_zyx(self._q)
 
@@ -145,20 +176,23 @@ class DroneSim:
         self.flight_records.add_state(self.drone_state, t_now)
 
 
-if __name__ == "__main__":
-    t=0
-    z_ref = 0 # meters
-    T_end = 40.0
+def test_thrust_system():
+    t = 0
+    z_ref = 0  # meters
+    t_end = 40.0
     dt = 0.01
     steps = []
     input_signal = []
 
-    drone = DroneSim(weight=1.9 * 9.81,
-                     diameter=0.2,
-                     height=0.3,
-                     motor_model="T-Motor F80 PRO 2408 Brushless Motor")
+    drone = (DroneSim(weight=1.9 * 9.81,
+                      diameter=0.2,
+                      height=0.3,
+                      motor_model="T-Motor F80 PRO 2408 Brushless Motor",
+                      altitude_control=ControlParams(Kp=2, Kv=0.5, Ki=0),
+                      orientation_control=ControlParams(Kp=2, Kv=0.5, Ki=0),
+                      position_control=ControlParams(Kp=2, Kv=0.5, Ki=0)))
 
-    while t < T_end:
+    while t < t_end:
         if t > 5.0:
             z_ref = 2
         alpha_cmd, beta_cmd = drone.orientation_control.compute_target_deflection(
@@ -174,12 +208,112 @@ if __name__ == "__main__":
         steps.append(t)
         input_signal.append(z_ref)
 
-
     z_pos = [float(pos["pos"][2]) for pos in drone.flight_records.records]
     print("Z_Positions: ", z_pos)
     print("t:", steps)
     print("input: ", input_signal)
     fig, ax = plt.subplots()
-    ax.plot(steps, z_pos)
-    ax.plot(steps, input_signal)
+    ax.plot(steps, z_pos, label='Step Response')
+    ax.plot(steps, input_signal, label='Input')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Height (m)')
+    ax.legend()
     plt.show()
+
+def test_orientation_system():
+    t = 0
+    z_ref = 0  # meters
+    t_end = 40.0
+    dt = 0.01
+    steps = []
+    orientations = []
+    orientations_yaw = []
+
+    drone = (DroneSim(weight=1.9 * 9.81,
+                      diameter=0.2,
+                      height=0.3,
+                      motor_model="T-Motor F80 PRO 2408 Brushless Motor",
+                      altitude_control=ControlParams(Kp=2, Kv=0.5, Ki=0),
+                      orientation_control=ControlParams(Kp=2, Kv=1.2, Ki=0),
+                      position_control=ControlParams(Kp=2, Kv=0.5, Ki=0)))
+
+    drone.drone_state.position = [0, 0, 2]
+    drone.motor.throttle = math.sqrt((drone.mass*drone.g)/drone.motor.T_max_N)
+
+    drone.set_orientation_euler(pitch=math.radians(-20), roll=math.radians(-10))
+
+    while t < t_end:
+
+        alpha_cmd, beta_cmd = drone.orientation_control.compute_target_deflection(
+            drone, ref_pitch=0.0, ref_yaw=0.0)
+        throttle = drone.altitude_control.step(drone, z_ref)
+        drone.update(dt,
+                     throttle,
+                     manual_deflection=(alpha_cmd, beta_cmd),
+                     ref_pitch=0.0,
+                     ref_yaw=0.0,
+                     t_now=t)
+        t += dt
+        steps.append(t)
+        orientations.append(drone.drone_state.orientation[0])
+        orientations_yaw.append(drone.drone_state.orientation[1])
+
+
+    fig, ax = plt.subplots()
+    ax.plot(steps, orientations, label='Orientation')
+    ax.plot(steps, orientations_yaw, label='Orientation_yaw')
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Orientation (Roll)')
+    ax.legend()
+    plt.show()
+
+def test_position_system():
+    t = 0
+    z_ref = 0  # meters
+    t_end = 40.0
+    dt = 0.01
+    steps = []
+    positions_x = []
+    positions_y = []
+
+    drone = (DroneSim(weight=1.9 * 9.81,
+                      diameter=0.2,
+                      height=0.3,
+                      motor_model="T-Motor F80 PRO 2408 Brushless Motor",
+                      altitude_control=ControlParams(Kp=2, Kv=0.5, Ki=0),
+                      orientation_control=ControlParams(Kp=2, Kv=1.2, Ki=0),
+                      position_control=ControlParams(Kp=0.7, Kv=0.2, Ki=0)))
+
+    drone.drone_state.position = [0, 0, 2]
+    drone.motor.throttle = math.sqrt((drone.mass*drone.g)/drone.motor.T_max_N)
+    drone.position_control.x_ref = 0
+    drone.position_control.y_ref = 0
+
+    while t < t_end:
+        if t >= 5.0:
+            drone.position_control.x_ref = 1
+            drone.position_control.y_ref = 1
+
+        pitch_ref, roll_ref = drone.position_control.step(drone)
+        throttle = drone.altitude_control.step(drone, z_ref)
+        drone.update(dt,
+                     throttle,
+                     ref_pitch=roll_ref,
+                     ref_yaw=pitch_ref,
+                     t_now=t)
+        t += dt
+        steps.append(t)
+        positions_x.append(drone.drone_state.position[0])
+        positions_y.append(drone.drone_state.position[1])
+
+
+    fig, ax = plt.subplots()
+    ax.plot(steps, positions_x, label='Position x')
+    ax.plot(steps, positions_y, label='Position y')
+    ax.set_xlabel('Time (s)')
+    ax.legend()
+    plt.show()
+
+
+if __name__ == "__main__":
+    test_position_system()

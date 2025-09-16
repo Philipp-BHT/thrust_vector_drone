@@ -4,7 +4,7 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 import numpy as np
 import math
-from drone import DroneSim
+from drone import DroneSim, ControlParams
 
 
 def draw_reference_rings(center, radius=0.2, segments=100):
@@ -263,10 +263,14 @@ def run_pygame_simulation():
     font = pygame.font.SysFont("Arial", 18)
     clock = pygame.time.Clock()
 
-    drone = DroneSim(weight=1.9*9.81,
-                     diameter=0.2,
-                     height=0.3,
-                     motor_model="T-Motor F80 PRO 2408 Brushless Motor")
+    drone = (DroneSim(weight=1.9 * 9.81,
+                      diameter=0.2,
+                      height=0.3,
+                      motor_model="T-Motor F80 PRO 2408 Brushless Motor",
+                      altitude_control=ControlParams(Kp=2, Kv=0.5, Ki=0),
+                      position_control=ControlParams(Kp=0.7, Kv=0.2, Ki=0),
+                      orientation_control=ControlParams(Kp=2, Kv=1.2, Ki=0),
+                      ))
 
     camera_angle_pitch = 0
     camera_angle_yaw = 0
@@ -282,8 +286,6 @@ def run_pygame_simulation():
     while running:
         pygame.event.set_grab(True)
         pygame.mouse.set_visible(False)
-
-        # stop when below ground
 
         if drone.drone_state.position[2] < 0:
             pygame.event.set_grab(False)
@@ -333,7 +335,7 @@ def run_pygame_simulation():
         else:
             pitch_ref, roll_ref = 0, 0
 
-        drone.update(dt, throttle, manual_deflection=manual_deflection, ref_pitch=pitch_ref, ref_yaw=roll_ref)
+        drone.update(dt, throttle, manual_deflection=manual_deflection, ref_pitch=roll_ref, ref_yaw=pitch_ref)
 
         drone.flight_records.add_state(drone.drone_state, t)
         t += dt
