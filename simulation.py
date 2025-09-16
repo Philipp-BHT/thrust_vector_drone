@@ -268,7 +268,6 @@ def run_pygame_simulation():
                      height=0.3,
                      motor_model="T-Motor F80 PRO 2408 Brushless Motor")
 
-    max_gimbal_rate = 20  # deg/s
     camera_angle_pitch = 0
     camera_angle_yaw = 0
     launched = False

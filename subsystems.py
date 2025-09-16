@@ -186,9 +186,6 @@ class OrientationController:
         p_dot, y_dot = drone.drone_state.angular_velocity[0], drone.drone_state.angular_velocity[1]
         e_p, e_y = (ref_pitch - pitch), (ref_yaw - yaw)
 
-        # self.i_pitch = self._sat(self.i_pitch + e_p * self.dt, self.i_clamp)
-        # self.i_yaw = self._sat(self.i_yaw + e_y * self.dt, self.i_clamp)
-
         u_p = self.Kp * e_p + self.Ki * self.i_pitch - self.Kv * p_dot
         u_y = self.Kp * e_y + self.Ki * self.i_yaw - self.Kv * y_dot
         return -u_p, -u_y
@@ -196,10 +193,10 @@ class OrientationController:
 class PositionController:
     def __init__(self,
                  Kp=0.1, Ki=0, Kv=1, dt=0.01,
-                 i_clamp=2.0,                # meters*s anti-windup
-                 max_tilt_deg=8.0,          # attitude reference limit
-                 sign_pitch=-1.0,            # θ_ref ≈ sign_pitch * a_x/g
-                 sign_roll =+1.0):           # φ_ref ≈ sign_roll  * a_y/g
+                 i_clamp=2.0,
+                 max_tilt_deg=8.0,
+                 sign_pitch=-1.0,
+                 sign_roll =+1.0):
         self.Kp, self.Ki, self.Kv = Kp, Ki, Kv
         self.dt = dt
         self.ix = 0.0
@@ -232,18 +229,15 @@ class PositionController:
         vx, vy, _ = drone.drone_state.velocity
         ex = self.x_ref - y
         ey = self.y_ref - x
-        # print(f"Error: {ex}, {ey}")
 
-        # PI on position + damping on velocity -> desired horizontal acceleration (m/s^2)
         self.ix = self._sat(self.ix + ex * self.dt, self.i_clamp)
         self.iy = self._sat(self.iy + ey * self.dt, self.i_clamp)
         ax_cmd = self.Kp*ex + self.Ki*self.ix - self.Kv*vx
         ay_cmd = self.Kp*ey + self.Ki*self.iy - self.Kv*vy
 
-        # small-angle map: a_x ≈ g * θ, a_y ≈ g * φ (signs depend on axes)
         g = drone.g
-        pitch_ref = self.sign_pitch * self._sat(ax_cmd / g, self.max_tilt)  # θ (about body-Y)
-        roll_ref  = self.sign_roll  * self._sat(ay_cmd / g, self.max_tilt)  # φ (about body-X)
+        pitch_ref = self.sign_pitch * self._sat(ax_cmd / g, self.max_tilt)
+        roll_ref  = self.sign_roll  * self._sat(ay_cmd / g, self.max_tilt)
 
         return pitch_ref, roll_ref
 

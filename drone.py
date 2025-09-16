@@ -145,88 +145,41 @@ class DroneSim:
         self.flight_records.add_state(self.drone_state, t_now)
 
 
-def plot_trajectory_3d(flight_log, show_quivers=False, every_n=20):
-    """3D path of the drone. Optionally draw sparse heading arrows."""
-    if not flight_log.records:
-        print("No data to plot.")
-        return
+if __name__ == "__main__":
+    t=0
+    z_ref = 0 # meters
+    T_end = 40.0
+    dt = 0.01
+    steps = []
+    input_signal = []
 
-    P = np.array([r['pos'] for r in flight_log.records])  # shape (N,3)
-    X, Y, Z = P[:,0], P[:,1], P[:,2]
+    drone = DroneSim(weight=1.9 * 9.81,
+                     diameter=0.2,
+                     height=0.3,
+                     motor_model="T-Motor F80 PRO 2408 Brushless Motor")
 
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
+    while t < T_end:
+        if t > 5.0:
+            z_ref = 2
+        alpha_cmd, beta_cmd = drone.orientation_control.compute_target_deflection(
+            drone, ref_pitch=0.0, ref_yaw=0.0)
+        throttle = drone.altitude_control.step(drone, z_ref)
+        drone.update(dt,
+                     throttle,
+                     manual_deflection=(alpha_cmd, beta_cmd),
+                     ref_pitch=0.0,
+                     ref_yaw=0.0,
+                     t_now=t)
+        t += dt
+        steps.append(t)
+        input_signal.append(z_ref)
 
-    # Path
-    ax.plot(X, Y, Z, linewidth=2)
 
-    # Start/end markers
-    ax.scatter(X[0], Y[0], Z[0], s=50, marker='o', label='start')
-    ax.scatter(X[-1], Y[-1], Z[-1], s=50, marker='^', label='end')
-
-    # Optional: sparse orientation arrows (uses yaw only as heading demo)
-    if show_quivers:
-        ORI = np.array([r['ori'] for r in flight_log.records])
-        yaw = ORI[::every_n, 1]  # assuming orientation = [pitch, yaw, roll]
-        Xs, Ys, Zs = X[::every_n], Y[::every_n], Z[::every_n]
-        u = np.cos(yaw); v = np.sin(yaw); w = np.zeros_like(u)
-        ax.quiver(Xs, Ys, Zs, u, v, w, length=0.2, normalize=True)
-
-    # Equal aspect ratio
-    _set_equal_3d(ax, X, Y, Z)
-
-    ax.set_xlabel('X [m]'); ax.set_ylabel('Y [m]'); ax.set_zlabel('Z [m]')
-    ax.legend(loc='upper left')
-    ax.set_title('Drone trajectory (3D)')
-    plt.tight_layout()
+    z_pos = [float(pos["pos"][2]) for pos in drone.flight_records.records]
+    print("Z_Positions: ", z_pos)
+    print("t:", steps)
+    print("input: ", input_signal)
+    fig, ax = plt.subplots()
+    ax.plot(steps, z_pos)
+    ax.plot(steps, input_signal)
     plt.show()
-
-def _set_equal_3d(ax, X, Y, Z):
-    """Make 3D axes have equal scale."""
-    x_range = X.max() - X.min()
-    y_range = Y.max() - Y.min()
-    z_range = Z.max() - Z.min()
-    max_range = max(x_range, y_range, z_range)
-    x_mid = (X.max() + X.min())/2
-    y_mid = (Y.max() + Y.min())/2
-    z_mid = (Z.max() + Z.min())/2
-    ax.set_xlim(x_mid - max_range/2, x_mid + max_range/2)
-    ax.set_ylim(y_mid - max_range/2, y_mid + max_range/2)
-    ax.set_zlim(z_mid - max_range/2, z_mid + max_range/2)
-    try:
-        ax.set_box_aspect((1,1,1))
-    except Exception:
-        pass
-
-def animate_trajectory_3d(flight_log):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    line, = ax.plot([], [], [], linewidth=2)
-    start = ax.scatter([], [], [], s=50, marker='o')
-    end   = ax.scatter([], [], [], s=50, marker='^')
-
-    def init():
-        line.set_data([], [])
-        line.set_3d_properties([])
-        return line, start, end
-
-    def update(frame):
-        P = np.array([r['pos'] for r in flight_log.records[:frame]])
-        if P.size == 0:
-            return line, start, end
-        X, Y, Z = P[:,0], P[:,1], P[:,2]
-        line.set_data(X, Y)
-        line.set_3d_properties(Z)
-
-        # Start/end markers
-        start._offsets3d = (np.array([X[0]]), np.array([Y[0]]), np.array([Z[0]]))
-        end._offsets3d   = (np.array([X[-1]]), np.array([Y[-1]]), np.array([Z[-1]]))
-
-        _set_equal_3d(ax, X, Y, Z)
-        ax.set_xlabel('X [m]'); ax.set_ylabel('Y [m]'); ax.set_zlabel('Z [m]')
-        return line, start, end
-
-    ani = FuncAnimation(fig, update, frames=len(flight_log.records),
-                        init_func=init, interval=30, blit=False, repeat=False)
-    plt.show()
-
