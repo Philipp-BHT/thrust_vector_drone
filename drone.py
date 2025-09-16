@@ -227,7 +227,7 @@ def test_orientation_system():
     dt = 0.01
     steps = []
     orientations = []
-    orientations_yaw = []
+    uerr = []
 
     drone = (DroneSim(weight=1.9 * 9.81,
                       diameter=0.2,
@@ -239,13 +239,15 @@ def test_orientation_system():
 
     drone.drone_state.position = [0, 0, 2]
     drone.motor.throttle = math.sqrt((drone.mass*drone.g)/drone.motor.T_max_N)
+    # drone.set_orientation_euler(pitch=math.radians(-20))
 
-    drone.set_orientation_euler(pitch=math.radians(-20), roll=math.radians(-10))
-
+    ref_pitch = 0.0
     while t < t_end:
+        if t >= 5.0:
+            ref_pitch = math.radians(20)
 
         alpha_cmd, beta_cmd = drone.orientation_control.compute_target_deflection(
-            drone, ref_pitch=0.0, ref_yaw=0.0)
+            drone, ref_pitch=ref_pitch, ref_yaw=0.0)
         throttle = drone.altitude_control.step(drone, z_ref)
         drone.update(dt,
                      throttle,
@@ -255,13 +257,16 @@ def test_orientation_system():
                      t_now=t)
         t += dt
         steps.append(t)
-        orientations.append(drone.drone_state.orientation[0])
-        orientations_yaw.append(drone.drone_state.orientation[1])
+        orientations.append(float(drone.drone_state.orientation[0]))
+        uerr.append(ref_pitch)
 
+
+    print("ySystem = ", orientations, ";")
+    print("t = ", steps, ";")
+    print("uerr = ", uerr, ";")
 
     fig, ax = plt.subplots()
     ax.plot(steps, orientations, label='Orientation')
-    ax.plot(steps, orientations_yaw, label='Orientation_yaw')
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Orientation (Roll)')
     ax.legend()
@@ -316,4 +321,4 @@ def test_position_system():
 
 
 if __name__ == "__main__":
-    test_position_system()
+    test_orientation_system()

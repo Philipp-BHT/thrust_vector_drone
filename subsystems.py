@@ -223,6 +223,28 @@ class PositionController:
         print("Capture at ", self.x_ref, self.y_ref)
         print(drone.drone_state.position)
 
+    def capture_ahead_tau(self, drone, tau=1):
+        px, py, _ = drone.drone_state.position
+        vx, vy, _ = drone.drone_state.velocity
+        ax, ay, _ = drone.drone_state.acceleration
+        self.x_ref = px + vx * tau
+        self.y_ref = py + vy * tau
+
+    def capture_ahead_stop(self, drone, max_tilt_deg=10.0):
+        px, py, _ = drone.drone_state.position
+        vx, vy, _ = drone.drone_state.velocity
+        v = math.hypot(vx, vy)
+        if v < 1e-3:
+            self.x_ref, self.y_ref = px, py
+            return
+
+        g = drone.g
+        a_max = g * math.tan(math.radians(max_tilt_deg))
+        s_over_v = v / (2.0 * a_max)  # = s / ||v||
+        x_ref = px + s_over_v * vx
+        y_ref = py + s_over_v * vy
+        self.x_ref, self.y_ref = x_ref, y_ref
+
     def step(self, drone):
         """Return (pitch_ref, roll_ref) in radians to hold XY."""
         assert self.x_ref is not None and self.y_ref is not None, "Call capture_here() first."

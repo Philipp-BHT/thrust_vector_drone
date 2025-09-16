@@ -67,9 +67,9 @@ def draw_drone(drone: DroneSim):
 
     pitch, yaw, roll = drone.drone_state.orientation  # RAD
     # Apply Rz(-yaw) → Ry(-pitch) → Rx(-roll); degrees for GL
-    glRotatef(-math.degrees(yaw),   1, 0, 0)  # yaw about Z
-    glRotatef(-math.degrees(pitch), 0, 1, 0)  # pitch about Y
-    glRotatef(-math.degrees(roll),  0, 0, 1)  # roll about X
+    glRotatef(math.degrees(pitch),   1, 0, 0)  # yaw about Z
+    glRotatef(math.degrees(roll), 0, 1, 0)  # pitch about Y
+    glRotatef(math.degrees(yaw),  0, 0, 1)  # roll about X
 
     # --- Body geometry (cylinder) ---
     quadric = gluNewQuadric()
@@ -80,8 +80,8 @@ def draw_drone(drone: DroneSim):
     # Nozzle (local to body). alpha = about Y, beta = about X:
     glPushMatrix()
     alpha_rad, beta_rad = drone.deflector.get_deflection()
-    glRotatef(math.degrees(beta_rad), 1, 0, 0)  # roll axis (X)
-    glRotatef(math.degrees(alpha_rad), 0, 1, 0)  # pitch axis (Y)
+    glRotatef(math.degrees(alpha_rad), 1, 0, 0)  # roll axis (X)
+    glRotatef(math.degrees(beta_rad), 0, 1, 0)  # pitch axis (Y)
 
     glTranslatef(0, 0, -0.15)
     glColor3f(0.8, 0.3, 0.5)
@@ -278,6 +278,8 @@ def run_pygame_simulation():
     running = True
     manual_prev = False
     z_ref = 2.0
+    roll_ref = 0
+    pitch_ref = 0
 
     t = 0.0
     stars = [(np.random.uniform(-500, 500), np.random.uniform(100, 500), np.random.uniform(-500, 500))
@@ -310,32 +312,24 @@ def run_pygame_simulation():
             throttle = drone.altitude_control.step(drone, z_ref)
         else:
             throttle = 0
-        alpha, beta = drone.deflector.get_deflection()
-        step = drone.deflector.max_rate * dt
 
-        if keys[K_a]: alpha -= step
-        if keys[K_d]: alpha += step
-        if keys[K_s]: beta -= step
-        if keys[K_w]: beta += step
-
-        alpha = max(-drone.deflector.max_deflection, min(drone.deflector.max_deflection, alpha))
-        beta = max(-drone.deflector.max_deflection, min(drone.deflector.max_deflection, beta))
+        if keys[K_a]: roll_ref = math.radians(20)
+        if keys[K_d]: roll_ref = math.radians(-20)
+        if keys[K_s]: pitch_ref = math.radians(20)
+        if keys[K_w]: pitch_ref = math.radians(-20)
 
         pressed = keys[K_a] or keys[K_d] or keys[K_s] or keys[K_w]
-        manual_deflection = (alpha, beta) if pressed else None
 
         if manual_prev and not pressed:
-            drone.position_control.capture_here(drone)
+            drone.position_control.capture_ahead_tau(drone)
 
         if drone.position_control.x_ref is None:
-            drone.position_control.capture_here(drone)
+            drone.position_control.capture_ahead_tau(drone)
 
         if not pressed:
             pitch_ref, roll_ref = drone.position_control.step(drone)
-        else:
-            pitch_ref, roll_ref = 0, 0
 
-        drone.update(dt, throttle, manual_deflection=manual_deflection, ref_pitch=roll_ref, ref_yaw=pitch_ref)
+        drone.update(dt, throttle, manual_deflection=None, ref_pitch=roll_ref, ref_yaw=pitch_ref)
 
         drone.flight_records.add_state(drone.drone_state, t)
         t += dt
