@@ -1,8 +1,6 @@
 import numpy as np
 import math
 
-import math
-
 class Motor:
     # Parameters assuming 6040 2-blade propellers
     MOTOR_PARAMETERS = {
@@ -86,8 +84,8 @@ class DroneState:
         self.position = np.zeros(3)       # [x, y, z]
         self.velocity = np.zeros(3)       # [vx, vy, vz]
         self.acceleration = np.zeros(3)   # [ax, ay, az]
-        self.orientation = np.zeros(3)    # [pitch, yaw, roll] or use quaternions if needed
-        self.angular_velocity = np.zeros(3)  # [pitch_rate, yaw_rate, roll_rate]
+        self.orientation = np.zeros(3)    # [pitch, roll, yaw] or use quaternions if needed
+        self.angular_velocity = np.zeros(3)  # [pitch_rate, roll_rate, yaw_rate]
 
     def __repr__(self):
         return f"Pos: {self.position}, Vel: {self.velocity}, Acc: {self.acceleration}"
@@ -113,8 +111,8 @@ class AltitudeController:
                  i_clamp=3.0,  # clamp on the integral term (m/s)
                  min_cos=0.2,  # avoid divide-by-near-zero when tilted hard
                  a_cmd_limit=5.0):  # vertical accel command limit (m/s^2)
-        self.Kp, self.Ki, self.Kv = [control_params.Kp, control_params.Ki, control_params.Kv] if (
-            control_params) else [1.2, 0.4, 0.8]
+        self.Kp, self.Ki, self.Kv = (control_params.Kp, control_params.Ki, control_params.Kv) if (
+            control_params) else (1.2, 0.4, 0.8)
         self.dt = dt
         self.i = 0.0
         self.i_clamp = i_clamp
@@ -171,8 +169,8 @@ class OrientationController:
                  dt=0.01,
                  max_deflect=math.radians(15),
                  i_clamp=None):
-        self.Kp, self.Ki, self.Kv = [control_params.Kp, control_params.Ki, control_params.Kv] if (
-            control_params) else [2.5, 0, 6]
+        self.Kp, self.Ki, self.Kv = (control_params.Kp, control_params.Ki, control_params.Kv) if (
+            control_params) else (2.5, 0, 6)
 
         self.dt = dt
         self.max_deflect = max_deflect
@@ -184,14 +182,65 @@ class OrientationController:
     @staticmethod
     def _sat(x, lim): return max(-lim, min(lim, x))
 
-    def compute_target_deflection(self, drone, ref_pitch=0.0, ref_yaw=0.0):
-        pitch, yaw = drone.drone_state.orientation[0], drone.drone_state.orientation[1]
+    def compute_target_deflection(self, drone, ref_pitch=0.0, ref_roll=0.0):
+        pitch, roll = drone.drone_state.orientation[0], drone.drone_state.orientation[1]
         p_dot, y_dot = drone.drone_state.angular_velocity[0], drone.drone_state.angular_velocity[1]
-        e_p, e_y = (ref_pitch - pitch), (ref_yaw - yaw)
+        e_p, e_y = (ref_pitch - pitch), (ref_roll - roll)
 
         u_p = self.Kp * e_p + self.Ki * self.i_pitch - self.Kv * p_dot
         u_y = self.Kp * e_y + self.Ki * self.i_yaw - self.Kv * y_dot
         return -u_p, -u_y
+
+
+class VelocityController:
+    def __init__(self,
+                 control_params=None,
+                 dt=0.01,
+                 max_deflect=math.radians(15),
+                 i_clamp=None):
+        self.Kp, self.Ki, self.Kv = (
+            (control_params.Kp, control_params.Ki, control_params.Kv)
+            if control_params is not None else
+            (0.1, 0.0, 1.0)
+        )
+
+        self.dt = dt
+        self.max_deflect = max_deflect
+        self.i_clamp = (0.5 * max_deflect) if i_clamp is None else i_clamp
+
+        # state
+        self.i_pitch = 0.0
+        self.i_roll   = 0.0
+
+    @staticmethod
+    def _sat(x, lim):
+        return max(-lim, min(lim, x))
+
+    def compute_target_deflection(self, drone, ref_vel_x=0.0, ref_vel_y=0.0):
+        # --- measured velocities (world frame)
+        vx = drone.drone_state.velocity[0]
+        vy = drone.drone_state.velocity[1]
+
+        e_x = ref_vel_x - vx
+        e_y = ref_vel_y - vy
+
+        # integrator update (prelim)
+        self.i_pitch += self.Ki * e_x * self.dt
+        self.i_roll   += self.Ki * e_y * self.dt
+
+
+        self.i_pitch = self._sat(self.i_pitch, self.i_clamp)
+        self.i_roll   = self._sat(self.i_roll, self.i_clamp)
+
+        u_pitch = self.Kp * e_x + self.i_pitch - self.Kv * vx
+        u_roll = self.Kp * e_y + self.i_roll - self.Kv * vy
+
+        u_pitch = self._sat(u_pitch, self.max_deflect)
+        u_roll = self._sat(u_roll,   self.max_deflect)
+
+        print(u_pitch, u_roll)
+
+        return u_roll, u_pitch
 
 class PositionController:
     def __init__(self,
@@ -200,8 +249,8 @@ class PositionController:
                  max_tilt_deg=8.0,
                  sign_pitch=1.0,
                  sign_roll =-1.0):
-        self.Kp, self.Ki, self.Kv = [control_params.Kp, control_params.Ki, control_params.Kv] if (
-            control_params) else [0.1, 0, 1]
+        self.Kp, self.Ki, self.Kv = (control_params.Kp, control_params.Ki, control_params.Kv) if (
+            control_params) else (0.1, 0, 1)
         self.dt = dt
         self.ix = 0.0
         self.iy = 0.0

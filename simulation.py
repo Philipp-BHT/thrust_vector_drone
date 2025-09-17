@@ -206,9 +206,8 @@ def display(font, screen_width, screen_height, drone, camera_angle_yaw, camera_a
     center_of_mass = 0.0
     x_position, y_position, z_position = drone.drone_state.position
 
-    camera_distance = 3.0   # meters; change freely now
-    camera_height   = 1.5   # meters
-
+    camera_distance = 3.0
+    camera_height   = 1.5
     yaw_camera_angle_rad   = np.deg2rad(camera_angle_yaw)
     pitch_camera_angle_rad = np.deg2rad(camera_angle_pitch)
 
@@ -230,16 +229,8 @@ def display(font, screen_width, screen_height, drone, camera_angle_yaw, camera_a
 
     pygame.display.flip()
 
-def get_current_waypoint(t, waypoints):
-    # Find the last keyframe ≤ current time
-    angles = sorted(waypoints.keys())
-    for i in reversed(angles):
-        if t >= i:
-            return waypoints[i]['yaw'], waypoints[i]['pitch']
-    return waypoints[angles[0]]['yaw'], waypoints[angles[0]]['pitch']   # Default to the first key if none matched
 
-
-def run_pygame_simulation():
+def run_pygame_simulation(position_control = False):
     pygame.init()
     screen_width, screen_height = 800, 600
     pygame.display.set_caption("Real-Time 3D Drone Simulation")
@@ -250,7 +241,6 @@ def run_pygame_simulation():
 
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
-    # Tighter FOV and meter-friendly near/far planes
     gluPerspective(40.0, screen_width / screen_height, 0.01, 50.0)
 
     glMatrixMode(GL_MODELVIEW)
@@ -269,6 +259,7 @@ def run_pygame_simulation():
                       motor_model="T-Motor F80 PRO 2408 Brushless Motor",
                       altitude_control=ControlParams(Kp=2, Kv=0.5, Ki=0),
                       position_control=ControlParams(Kp=0.7, Kv=0.2, Ki=0),
+                      velocity_control=ControlParams(Kp=0.06, Kv=0.12, Ki=0),
                       orientation_control=ControlParams(Kp=2, Kv=1.2, Ki=0),
                       ))
 
@@ -278,8 +269,8 @@ def run_pygame_simulation():
     running = True
     manual_prev = False
     z_ref = 2.0
-    roll_ref = 0
-    pitch_ref = 0
+    roll_ref, pitch_ref = 0.0, 0.0
+    vel_x_ref, vel_y_ref = 0.0, 0.0
 
     t = 0.0
     stars = [(np.random.uniform(-500, 500), np.random.uniform(100, 500), np.random.uniform(-500, 500))
@@ -313,23 +304,34 @@ def run_pygame_simulation():
         else:
             throttle = 0
 
-        if keys[K_a]: roll_ref = math.radians(20)
-        if keys[K_d]: roll_ref = math.radians(-20)
-        if keys[K_s]: pitch_ref = math.radians(20)
-        if keys[K_w]: pitch_ref = math.radians(-20)
+        if position_control:
+            if keys[K_a]: roll_ref = math.radians(20)
+            if keys[K_d]: roll_ref = math.radians(-20)
+            if keys[K_s]: pitch_ref = math.radians(20)
+            if keys[K_w]: pitch_ref = math.radians(-20)
 
-        pressed = keys[K_a] or keys[K_d] or keys[K_s] or keys[K_w]
+            pressed = keys[K_a] or keys[K_d] or keys[K_s] or keys[K_w]
+            if manual_prev and not pressed:
+                drone.position_control.capture_ahead_tau(drone)
+            if drone.position_control.x_ref is None:
+                drone.position_control.capture_ahead_tau(drone)
+            if not pressed:
+                roll_ref, pitch_ref = drone.position_control.step(drone)
 
-        if manual_prev and not pressed:
-            drone.position_control.capture_ahead_tau(drone)
+        else:
+            if keys[K_a]: vel_x_ref = 100
+            if keys[K_d]: vel_x_ref = -100
+            if keys[K_s]: vel_y_ref = -100
+            if keys[K_w]: vel_y_ref = 100
 
-        if drone.position_control.x_ref is None:
-            drone.position_control.capture_ahead_tau(drone)
+            pressed = keys[K_a] or keys[K_d] or keys[K_s] or keys[K_w]
+            if not pressed:
+                vel_x_ref, vel_y_ref = 0.0, 0.0
 
-        if not pressed:
-            pitch_ref, roll_ref = drone.position_control.step(drone)
+            pitch_ref, roll_ref = drone.velocity_control.compute_target_deflection(drone, vel_x_ref, vel_y_ref)
 
-        drone.update(dt, throttle, manual_deflection=None, ref_pitch=roll_ref, ref_yaw=pitch_ref)
+
+        drone.update(dt, throttle, ref_pitch=pitch_ref, ref_roll=roll_ref)
 
         drone.flight_records.add_state(drone.drone_state, t)
         t += dt
@@ -341,6 +343,6 @@ def run_pygame_simulation():
 
 
 if __name__ == "__main__":
-    run_pygame_simulation()
+    run_pygame_simulation(position_control=False)
 
 

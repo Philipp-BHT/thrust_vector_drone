@@ -14,7 +14,8 @@ class DroneSim:
     def __init__(self, weight, diameter, height, motor_model: str = None,
                  altitude_control=ControlParams(),
                  orientation_control=ControlParams(),
-                 position_control=ControlParams()):
+                 position_control=ControlParams(),
+                 velocity_control=ControlParams()):
         self.weight = weight
         self.diameter = diameter
         self.height = height
@@ -26,6 +27,7 @@ class DroneSim:
         self.orientation_control = OrientationController(orientation_control)
         self.altitude_control = AltitudeController(altitude_control)
         self.position_control = PositionController(position_control)
+        self.velocity_control = VelocityController(velocity_control)
         self.battery = Battery()
 
         self.g = 9.81
@@ -110,7 +112,7 @@ class DroneSim:
 
     def update(self, dt, throttle,
                manual_deflection=None,  # (alpha, beta) in radians if mode="manual"
-               ref_pitch=0.0, ref_yaw=0.0,  # desired attitude if closed-loop
+               ref_pitch=0.0, ref_roll=0.0,  # desired attitude if closed-loop
                t_now=0.0):
 
         # choose ONE deflection source
@@ -118,7 +120,7 @@ class DroneSim:
             alpha = manual_deflection[0]
             beta = manual_deflection[1]
         else:
-            alpha, beta = self.orientation_control.compute_target_deflection(self, ref_pitch, ref_yaw)
+            alpha, beta = self.orientation_control.compute_target_deflection(self, ref_pitch, ref_roll)
         # alpha, beta = manual_deflection
         # print(alpha, beta)
 
@@ -196,13 +198,13 @@ def test_thrust_system():
         if t > 5.0:
             z_ref = 2
         alpha_cmd, beta_cmd = drone.orientation_control.compute_target_deflection(
-            drone, ref_pitch=0.0, ref_yaw=0.0)
+            drone, ref_pitch=0.0, ref_roll=0.0)
         throttle = drone.altitude_control.step(drone, z_ref)
         drone.update(dt,
                      throttle,
                      manual_deflection=(alpha_cmd, beta_cmd),
                      ref_pitch=0.0,
-                     ref_yaw=0.0,
+                     ref_roll=0.0,
                      t_now=t)
         t += dt
         steps.append(t)
@@ -247,13 +249,13 @@ def test_orientation_system():
             ref_pitch = math.radians(20)
 
         alpha_cmd, beta_cmd = drone.orientation_control.compute_target_deflection(
-            drone, ref_pitch=ref_pitch, ref_yaw=0.0)
+            drone, ref_pitch=ref_pitch, ref_roll=0.0)
         throttle = drone.altitude_control.step(drone, z_ref)
         drone.update(dt,
                      throttle,
                      manual_deflection=(alpha_cmd, beta_cmd),
                      ref_pitch=0.0,
-                     ref_yaw=0.0,
+                     ref_roll=0.0,
                      t_now=t)
         t += dt
         steps.append(t)
@@ -304,7 +306,7 @@ def test_position_system():
         drone.update(dt,
                      throttle,
                      ref_pitch=roll_ref,
-                     ref_yaw=pitch_ref,
+                     ref_roll=pitch_ref,
                      t_now=t)
         t += dt
         steps.append(t)
@@ -319,6 +321,58 @@ def test_position_system():
     ax.legend()
     plt.show()
 
+def test_velocity_system():
+    t = 0
+    z_ref = 2
+    t_end = 40.0
+    dt = 0.01
+    steps = []
+    velocity_x = []
+    velocity_y = []
+    positions_x = []
+
+    drone = (DroneSim(weight=1.9 * 9.81,
+                      diameter=0.2,
+                      height=0.3,
+                      motor_model="T-Motor F80 PRO 2408 Brushless Motor",
+                      altitude_control=ControlParams(Kp=2, Kv=0.5, Ki=0),
+                      orientation_control=ControlParams(Kp=2, Kv=1.2, Ki=0),
+                      position_control=ControlParams(Kp=0.7, Kv=0.2, Ki=0),
+                      velocity_control=ControlParams(Kp=0.01, Kv=0.1, Ki=0.0)))
+
+    drone.drone_state.position = [0, 0, 2]
+    drone.motor.throttle = math.sqrt((drone.mass*drone.g)/drone.motor.T_max_N)
+    drone.drone_state.velocity[1] = 1.3
+    ref_vel_x = 0
+    ref_vel_y = 1.3
+
+    while t < t_end:
+        if t >= 5.0:
+            ref_vel_x = 0
+            ref_vel_y = 0
+
+
+        pitch_ref, roll_ref = drone.velocity_control.compute_target_deflection(drone, ref_vel_x, ref_vel_y)
+        throttle = drone.altitude_control.step(drone, z_ref)
+        drone.update(dt,
+                     throttle,
+                     ref_pitch=roll_ref,
+                     ref_roll=pitch_ref,
+                     t_now=t)
+        t += dt
+        steps.append(t)
+        velocity_x.append(drone.drone_state.velocity[0])
+        velocity_y.append(drone.drone_state.velocity[1])
+        positions_x.append(drone.drone_state.position[0])
+
+
+    fig, ax = plt.subplots()
+    ax.plot(steps, velocity_y, label='Velocity x')
+    # ax.plot(steps, positions_x, label='Velocity y')
+    ax.set_xlabel('Time (s)')
+    ax.legend()
+    plt.show()
+
 
 if __name__ == "__main__":
-    test_orientation_system()
+    test_velocity_system()
